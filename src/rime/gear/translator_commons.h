@@ -25,6 +25,24 @@ class Patterns : public vector<boost::regex> {
   bool Load(an<ConfigList> patterns);
 };
 
+class Context;
+class Engine;
+
+// Select the first enabled option group, in configuration order.
+// Each group requires an option; its rules may be empty.
+class OptionProjection {
+ public:
+  bool Load(an<ConfigList> settings);
+  Projection* Active(const Context* context);
+
+ protected:
+  struct Rule {
+    string option;
+    Projection formatter;
+  };
+  vector<Rule> rules_;
+};
+
 //
 
 class Spans {
@@ -69,9 +87,12 @@ class Phrase : public Candidate {
          const an<DictEntry>& entry)
       : Candidate(type, start, end), language_(language), entry_(entry) {}
   const string& text() const { return entry_->text; }
-  string comment() const { return entry_->comment; }
+  string comment() const {
+    return comment_hidden_ ? string() : entry_->comment;
+  }
   string preedit() const { return entry_->preedit; }
   void set_comment(const string& comment) { entry_->comment = comment; }
+  void set_comment_hidden(bool hidden) { comment_hidden_ = hidden; }
   void set_preedit(const string& preedit) { entry_->preedit = preedit; }
   void set_syllabifier(an<PhraseSyllabifier> syllabifier) {
     syllabifier_ = syllabifier;
@@ -107,6 +128,7 @@ class Phrase : public Candidate {
   const Language* language_;
   an<DictEntry> entry_;
   an<PhraseSyllabifier> syllabifier_;
+  bool comment_hidden_ = false;
 };
 
 //
@@ -167,6 +189,12 @@ class TranslatorOptions {
   void set_initial_quality(double quality) { initial_quality_ = quality; }
   Projection& preedit_formatter() { return preedit_formatter_; }
   Projection& comment_formatter() { return comment_formatter_; }
+  // Shared formatting entry points; legacy Projection syntax remains supported.
+  void ApplyPreeditFormat(string* value);
+  void ApplyCommentFormat(string* value);
+  bool SuppressComments();
+  bool has_preedit_format_config() const { return has_preedit_format_config_; }
+  bool use_option_comment_format() const { return use_option_comment_format_; }
   const hash_set<string>& blacklist() { return blacklist_; }
 
  protected:
@@ -178,8 +206,14 @@ class TranslatorOptions {
   double initial_quality_ = 0.;
   int max_sentences_ = 1;
   double sentence_cutoff_threshold_ = 0.1;
+  Engine* format_engine_ = nullptr;
   Projection preedit_formatter_;
   Projection comment_formatter_;
+  OptionProjection preedit_option_formatter_;
+  OptionProjection comment_option_formatter_;
+  bool has_preedit_format_config_ = false;
+  bool use_option_preedit_format_ = false;
+  bool use_option_comment_format_ = false;
   Patterns user_dict_disabling_patterns_;
   hash_set<string> blacklist_;
 };

@@ -37,6 +37,10 @@ class ScriptTranslator : public Translator,
                                       const Segment& seg) override;
 
   string FormatPreedit(const string& preedit);
+  string FormatPreedit(string&& preedit);
+  bool UseNativePreedit();
+  bool DecodeSpelling(const Code& code, vector<string>* syllables);
+  bool preedit_from_comment() const { return preedit_from_comment_; }
   string Spell(const Code& code);
   string GetPrecedingText(size_t start) const;
   bool UpdateElements(const CommitEntry& commit_entry);
@@ -61,6 +65,7 @@ class ScriptTranslator : public Translator,
   int core_word_length_ = 0;
   bool always_show_comments_ = false;
   bool enable_correction_ = false;
+  bool preedit_from_comment_ = false;
   bool enable_word_completion_ = false;
   the<Projection> canonicalizer_;
   the<Corrector> corrector_;

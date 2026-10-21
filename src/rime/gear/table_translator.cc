@@ -47,7 +47,7 @@ TableTranslation::TableTranslation(TranslatorOptions* options,
       iter_(std::move(iter)),
       uter_(std::move(uter)) {
   if (options_)
-    options_->preedit_formatter().Apply(&preedit_);
+    options_->ApplyPreeditFormat(&preedit_);
   CheckEmpty();
 }
 
@@ -75,9 +75,10 @@ an<Candidate> TableTranslation::Peek() {
     return nullptr;
   bool is_user_phrase = PreferUserPhrase();
   auto e = PreferredEntry(is_user_phrase);
+  const bool suppress_comment = options_ && options_->SuppressComments();
   string comment(is_constructed(e.get()) ? kUnitySymbol : e->comment);
-  if (options_) {
-    options_->comment_formatter().Apply(&comment);
+  if (options_ && !suppress_comment) {
+    options_->ApplyCommentFormat(&comment);
   }
   bool incomplete = e->remaining_code_length != 0;
   auto type = incomplete       ? "completion"
@@ -85,7 +86,10 @@ an<Candidate> TableTranslation::Peek() {
                                : "table";
   auto phrase = New<Phrase>(language_, type, start_, end_, e);
   if (phrase) {
-    phrase->set_comment(comment);
+    phrase->set_comment_hidden(suppress_comment);
+    if (!suppress_comment) {
+      phrase->set_comment(comment);
+    }
     phrase->set_preedit(preedit_);
     phrase->set_quality(std::exp(e->weight) + options_->initial_quality() +
                         (incomplete ? -1 : 0) + (is_user_phrase ? 0.5 : 0));
@@ -465,7 +469,7 @@ an<Candidate> SentenceTranslation::Peek() {
                             start_ + code_length, entry);
   if (translator_) {
     string preedit = input_.substr(0, code_length);
-    translator_->preedit_formatter().Apply(&preedit);
+    translator_->ApplyPreeditFormat(&preedit);
     result->set_preedit(preedit);
   }
   return result;
@@ -476,6 +480,13 @@ void SentenceTranslation::PrepareSentence() {
     return;
   sentence_->Offset(start_);
   sentence_->set_comment(kUnitySymbol);
+  // Preserve legacy sentence comments unless option-aware comment formatting
+  // is explicitly configured. With all options off, suppress the placeholder.
+  if (translator_ && translator_->use_option_comment_format()) {
+    string comment(kUnitySymbol);
+    translator_->ApplyCommentFormat(&comment);
+    sentence_->set_comment(comment);
+  }
   sentence_->set_syllabifier(New<SentenceSyllabifier>());
 
   if (!translator_)
@@ -491,7 +502,7 @@ void SentenceTranslation::PrepareSentence() {
     }
     pos += len;
   }
-  translator_->preedit_formatter().Apply(&preedit);
+  translator_->ApplyPreeditFormat(&preedit);
   sentence_->set_preedit(preedit);
 }
 

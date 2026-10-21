@@ -5,8 +5,11 @@
 // 2012-04-22 GONG Chen <chen.sst@gmail.com>
 //
 #include <algorithm>
+#include <utility>
 #include <boost/range/adaptor/reversed.hpp>
 #include <rime/config.h>
+#include <rime/context.h>
+#include <rime/engine.h>
 #include <rime/schema.h>
 #include <rime/ticket.h>
 #include <rime/gear/grammar.h>
@@ -26,6 +29,77 @@ bool Patterns::Load(an<ConfigList> patterns) {
     }
   }
   return true;
+}
+
+// OptionProjection
+
+bool OptionProjection::Load(an<ConfigList> settings) {
+  rules_.clear();
+  if (!settings)
+    return false;
+
+  for (size_t i = 0; i < settings->size(); ++i) {
+    auto group = As<ConfigMap>(settings->GetAt(i));
+    if (!group) {
+      LOG(ERROR) << "Conditional formatter entry #" << (i + 1)
+                 << " must be a map.";
+      rules_.clear();
+      return false;
+    }
+
+    if (!group->HasKey("option")) {
+      LOG(ERROR) << "Conditional formatter entry #" << (i + 1)
+                 << " is missing required 'option'.";
+      rules_.clear();
+      return false;
+    }
+    auto option = group->GetValue("option");
+    if (!option || option->str().empty()) {
+      LOG(ERROR) << "Conditional formatter entry #" << (i + 1)
+                 << " has an invalid 'option'.";
+      rules_.clear();
+      return false;
+    }
+    string option_name = option->str();
+
+    auto rules_item = group->Get("rules");
+    auto rules = As<ConfigList>(rules_item);
+    if (!rules) {
+      // Missing or empty rules mean identity formatting.
+      rules = New<ConfigList>();
+      if (auto empty_rules = As<ConfigValue>(rules_item)) {
+        if (!empty_rules->str().empty()) {
+          LOG(ERROR) << "Conditional formatter entry #" << (i + 1)
+                     << " requires 'rules' to be a list.";
+          rules_.clear();
+          return false;
+        }
+      } else if (rules_item && rules_item->type() != ConfigItem::kNull) {
+        LOG(ERROR) << "Conditional formatter entry #" << (i + 1)
+                   << " requires 'rules' to be a list.";
+        rules_.clear();
+        return false;
+      }
+    }
+
+    Rule rule;
+    rule.option = option_name;
+    if (!rule.formatter.Load(rules)) {
+      rules_.clear();
+      return false;
+    }
+    rules_.push_back(std::move(rule));
+  }
+  return !rules_.empty();
+}
+
+Projection* OptionProjection::Active(const Context* context) {
+  for (auto& rule : rules_) {
+    if (context && context->get_option(rule.option)) {
+      return &rule.formatter;
+    }
+  }
+  return nullptr;
 }
 
 // Spans
@@ -110,9 +184,20 @@ void Sentence::Offset(size_t offset) {
   set_end(end() + offset);
 }
 
+static bool HasOptionFormat(const an<ConfigList>& settings) {
+  if (!settings)
+    return false;
+  for (size_t i = 0; i < settings->size(); ++i) {
+    if (As<ConfigMap>(settings->GetAt(i)))
+      return true;
+  }
+  return false;
+}
+
 // TranslatorOptions
 
 TranslatorOptions::TranslatorOptions(const Ticket& ticket) {
+  format_engine_ = ticket.engine;
   if (!ticket.schema)
     return;
   if (Config* config = ticket.schema->config()) {
@@ -130,10 +215,30 @@ TranslatorOptions::TranslatorOptions(const Ticket& ticket) {
     config->GetDouble(ticket.name_space + "/sentence_cutoff_threshold",
                       &sentence_cutoff_threshold_);
 
-    preedit_formatter_.Load(
-        config->GetList(ticket.name_space + "/preedit_format"));
-    comment_formatter_.Load(
-        config->GetList(ticket.name_space + "/comment_format"));
+    auto preedit_format =
+        config->GetList(ticket.name_space + "/preedit_format");
+    has_preedit_format_config_ = preedit_format && preedit_format->size() > 0;
+    use_option_preedit_format_ = HasOptionFormat(preedit_format);
+    if (use_option_preedit_format_) {
+      if (!preedit_option_formatter_.Load(preedit_format)) {
+        LOG(ERROR) << "Failed to load conditional preedit_format.";
+      }
+    } else {
+      // Keep the original Projection path unchanged for legacy list syntax.
+      preedit_formatter_.Load(preedit_format);
+    }
+
+    auto comment_format =
+        config->GetList(ticket.name_space + "/comment_format");
+    use_option_comment_format_ = HasOptionFormat(comment_format);
+    if (use_option_comment_format_) {
+      if (!comment_option_formatter_.Load(comment_format)) {
+        LOG(ERROR) << "Failed to load conditional comment_format.";
+      }
+    } else {
+      // Keep the original Projection path unchanged for legacy list syntax.
+      comment_formatter_.Load(comment_format);
+    }
     user_dict_disabling_patterns_.Load(
         config->GetList(ticket.name_space + "/disable_user_dict_for_patterns"));
 
@@ -175,6 +280,41 @@ bool TranslatorOptions::IsUserDictDisabledFor(const string& input) const {
       return true;
   }
   return false;
+}
+
+void TranslatorOptions::ApplyPreeditFormat(string* value) {
+  if (!value)
+    return;
+  if (use_option_preedit_format_) {
+    Projection* formatter = preedit_option_formatter_.Active(
+        format_engine_ ? format_engine_->context() : nullptr);
+    if (formatter)
+      formatter->Apply(value);  // No active option: preserve native preedit.
+    return;
+  }
+  preedit_formatter_.Apply(value);
+}
+
+void TranslatorOptions::ApplyCommentFormat(string* value) {
+  if (!value)
+    return;
+  if (use_option_comment_format_) {
+    Projection* formatter = comment_option_formatter_.Active(
+        format_engine_ ? format_engine_->context() : nullptr);
+    if (formatter) {
+      formatter->Apply(value);
+    } else {
+      value->clear();  // Hide comments when every option is off.
+    }
+    return;
+  }
+  comment_formatter_.Apply(value);
+}
+
+bool TranslatorOptions::SuppressComments() {
+  return use_option_comment_format_ &&
+         !comment_option_formatter_.Active(
+             format_engine_ ? format_engine_->context() : nullptr);
 }
 
 }  // namespace rime

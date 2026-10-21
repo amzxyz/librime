@@ -196,6 +196,17 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
       enable_word_completion_ = enable_completion_;
     }
     config->GetInt(name_space_ + "/max_homophones", &max_homophones_);
+    string preedit_format_source;
+    if (config->GetString(name_space_ + "/preedit_format_source",
+                          &preedit_format_source)) {
+      if (preedit_format_source == "comment") {
+        preedit_from_comment_ = true;
+      } else if (preedit_format_source != "input") {
+        LOG(ERROR) << "Unknown " << name_space_ << "/preedit_format_source '"
+                   << preedit_format_source
+                   << "'; expected 'input' or 'comment'.";
+      }
+    }
     poet_.reset(new Poet(language(), config));
     if (an<ConfigList> rules = config->GetList(name_space_ + "/canonicalize")) {
       the<Projection> canonicalizer(new Projection());
@@ -308,17 +319,36 @@ bool ScriptTranslator::ProcessSegmentOnCommit(CommitEntry& commit_entry,
 
 string ScriptTranslator::FormatPreedit(const string& preedit) {
   string result = preedit;
-  preedit_formatter_.Apply(&result);
+  ApplyPreeditFormat(&result);
   return result;
+}
+
+string ScriptTranslator::FormatPreedit(string&& preedit) {
+  ApplyPreeditFormat(&preedit);
+  return std::move(preedit);
+}
+
+bool ScriptTranslator::UseNativePreedit() {
+  return use_option_preedit_format_ &&
+         !preedit_option_formatter_.Active(engine_ ? engine_->context()
+                                                   : nullptr);
+}
+
+bool ScriptTranslator::DecodeSpelling(const Code& code,
+                                      vector<string>* syllables) {
+  if (!syllables)
+    return false;
+  syllables->clear();
+  return dict_ && dict_->Decode(code, syllables) && !syllables->empty();
 }
 
 string ScriptTranslator::Spell(const Code& code) {
   string result;
   vector<string> syllables;
-  if (!dict_ || !dict_->Decode(code, &syllables) || syllables.empty())
+  if (!DecodeSpelling(code, &syllables))
     return result;
   result = boost::algorithm::join(syllables, string(1, delimiters_.at(0)));
-  comment_formatter_.Apply(&result);
+  ApplyCommentFormat(&result);
   return result;
 }
 
@@ -416,6 +446,27 @@ bool ScriptSyllabifier::IsCorrection(const Code& code,
 
 string ScriptSyllabifier::GetPreeditString(const Phrase& cand) const {
   const auto& delimiters = translator_->delimiters();
+  // Comment source applies to both legacy Projection rules and conditional
+  // option rules. With no formatter configured, or with all conditional
+  // options disabled, keep the native input-based syllabifier and delimiters.
+  const bool use_comment_source = translator_->preedit_from_comment() &&
+                                  translator_->has_preedit_format_config() &&
+                                  !translator_->UseNativePreedit();
+  if (use_comment_source) {
+    vector<string> syllables;
+    if (translator_->DecodeSpelling(cand.matching_code(), &syllables) &&
+        !syllables.empty()) {
+      string output;
+      for (size_t i = 0; i < syllables.size(); ++i) {
+        if (i > 0 && !delimiters.empty())
+          output += delimiters.at(0);
+        output += translator_->FormatPreedit(std::move(syllables[i]));
+      }
+      return output;
+    }
+    // If dictionary spellings cannot be aligned, fall back to native input
+    // preedit below without applying comment-source rules to the input codes.
+  }
   std::stack<size_t> lengths;
   string output;
   SyllabifyTask task{cand.matching_code(), syllable_graph_, cand.end() - start_,
@@ -435,7 +486,12 @@ string ScriptSyllabifier::GetPreeditString(const Phrase& cand) const {
                        lengths.pop();
                      }};
   if (syllabify_dfs(&task, 0, cand.start() - start_)) {
-    return translator_->FormatPreedit(output);
+    if (use_comment_source) {
+      // Decode fallback: preserve native input segmentation, but do not apply
+      // rules intended for dictionary spelling to the raw input code.
+      return output;
+    }
+    return translator_->FormatPreedit(std::move(output));
   } else {
     return string();
   }
@@ -568,10 +624,13 @@ an<Candidate> ScriptTranslation::Peek() {
   if (candidate_source_ == kUninitialized && !PrepareCandidate()) {
     return nullptr;
   }
-  if (candidate_->preedit().empty()) {
+  if (candidate_->preedit().empty() || translator_->UseNativePreedit() ||
+      translator_->preedit_from_comment()) {
     candidate_->set_preedit(syllabifier_->GetPreeditString(*candidate_));
   }
-  if (candidate_->comment().empty()) {
+  const bool suppress_comments = translator_->SuppressComments();
+  candidate_->set_comment_hidden(suppress_comments);
+  if (!suppress_comments && candidate_->comment().empty()) {
     auto spelling = syllabifier_->GetOriginalSpelling(*candidate_);
     if (!spelling.empty() && (translator_->always_show_comments() ||
                               spelling != candidate_->preedit())) {

@@ -60,16 +60,21 @@ an<Candidate> ReverseLookupTranslation::Peek() {
   string tips;
   if (dict_) {
     dict_->ReverseLookup(entry->text, &tips);
-    if (options_) {
-      options_->comment_formatter().Apply(&tips);
-    }
     // if (!tips.empty()) {
     //   boost::algorithm::replace_all(tips, " ", separator);
     // }
   }
-  an<Candidate> cand =
-      New<SimpleCandidate>("reverse_lookup", start_, end_, entry->text,
-                           !tips.empty() ? tips : entry->comment, preedit_);
+  string comment;
+  if (options_ && options_->use_option_comment_format()) {
+    comment = !tips.empty() ? tips : entry->comment;
+    options_->ApplyCommentFormat(&comment);
+  } else {
+    if (options_)
+      options_->ApplyCommentFormat(&tips);
+    comment = !tips.empty() ? tips : entry->comment;
+  }
+  an<Candidate> cand = New<SimpleCandidate>("reverse_lookup", start_, end_,
+                                            entry->text, comment, preedit_);
   return cand;
 }
 
